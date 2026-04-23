@@ -9,24 +9,17 @@ import mimetypes
 from PIL import Image
 import plotly.express as px
 import plotly.graph_objects as go
-import pyperclip  # cần cài: pip install pyperclip
 
 st.set_page_config(page_title="QL Lưu trú Pro", page_icon="🏨", layout="wide", initial_sidebar_state="collapsed")
 
-# CSS
+# CSS mobile
 st.markdown("""
     <style>
         @media (max-width: 768px) {
-            .stButton button { width: 100%; font-size: 1.1rem; }
+            .stButton button { width: 100%; font-size: 1.1rem; padding: 0.4rem; }
+            .stTextInput, .stSelectbox, .stDateInput, .stTextArea, .stNumberInput { font-size: 0.9rem; }
             h1 { font-size: 1.8rem; }
-        }
-        .copy-btn {
-            background-color: #4CAF50;
-            color: white;
-            border: none;
-            border-radius: 5px;
-            padding: 5px 10px;
-            cursor: pointer;
+            h2 { font-size: 1.4rem; }
         }
     </style>
 """, unsafe_allow_html=True)
@@ -36,25 +29,23 @@ def init_db():
     with sqlite3.connect('database.db') as conn:
         c = conn.cursor()
         c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
-        # Thêm cột location_text vào bảng facilities nếu chưa có
-        c.execute("PRAGMA table_info(facilities)")
-        cols = [col[1] for col in c.fetchall()]
-        if 'location_text' not in cols:
-            c.execute("ALTER TABLE facilities ADD COLUMN location_text TEXT")
         c.execute('''CREATE TABLE IF NOT EXISTS facilities (
-            id TEXT PRIMARY KEY, name TEXT, type TEXT, lat REAL, lon REAL,
+            id TEXT PRIMARY KEY, name TEXT, type TEXT, map_url TEXT,
             responsible_name TEXT, responsible_dob TEXT, responsible_id_number TEXT,
             responsible_permanent_address TEXT, responsible_phone TEXT,
             responsible_id_image_path TEXT, facility_image_path TEXT,
-            total_rooms INTEGER, created_at TEXT, location_text TEXT)''')
+            total_rooms INTEGER, created_at TEXT)''')
+        # Bảng residents mở rộng: cho phép start_date, end_date NULL nếu note_type = 'Người khác'
         c.execute('''CREATE TABLE IF NOT EXISTS residents (
             id TEXT PRIMARY KEY, facility_id TEXT, fullname TEXT, dob TEXT,
             id_number TEXT, permanent_address TEXT, id_image_path TEXT,
             phone TEXT, room_number TEXT, start_date TEXT, end_date TEXT,
-            note_type TEXT, created_at TEXT)''')
+            note_type TEXT, created_at TEXT,
+            FOREIGN KEY (facility_id) REFERENCES facilities(id))''')
         c.execute('''CREATE TABLE IF NOT EXISTS logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, action TEXT,
-            target_type TEXT, target_id TEXT, timestamp TEXT, details TEXT)''')
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT, action TEXT, target_type TEXT, target_id TEXT,
+            timestamp TEXT, details TEXT)''')
         c.execute("CREATE INDEX IF NOT EXISTS idx_res_facility ON residents(facility_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_res_id_number ON residents(id_number)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_res_end_date ON residents(end_date)")
@@ -71,9 +62,14 @@ def log_action(username, action, target_type, target_id, details=""):
         conn.commit()
 
 def safe_parse_date(date_str):
-    if not date_str or pd.isna(date_str): return None
-    try: return datetime.strptime(date_str, "%Y-%m-%d").date()
-    except: return None
+    if not date_str or pd.isna(date_str):
+        return None
+    try:
+        if isinstance(date_str, date):
+            return date_str
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except:
+        return None
 
 def validate_cccd(cccd): return bool(re.fullmatch(r'\d{12}', str(cccd))) if cccd else False
 def validate_phone(phone): return bool(re.fullmatch(r'(0|\+84)[0-9]{9,10}', str(phone))) if phone else False
@@ -89,44 +85,41 @@ def save_uploaded_file(uploaded_file, subfolder=""):
         f.write(uploaded_file.getbuffer())
     return file_path
 
-def copy_to_clipboard(text):
-    st.session_state['copy_text'] = text
-    # Dùng JavaScript để copy
-    st.markdown(f"""
-        <script>
-        function copyText() {{
-            navigator.clipboard.writeText(`{text}`);
-        }}
-        copyText();
-        </script>
-        """, unsafe_allow_html=True)
-    st.success("Đã sao chép vị trí!")
+def copy_button(text, label="📋 Copy URL"):
+    return st.markdown(
+        f"""
+        <button onclick="navigator.clipboard.writeText(`{text}`); alert('Đã sao chép URL!')" 
+                style="background-color:#4CAF50; color:white; border:none; border-radius:5px; padding:5px 10px; cursor:pointer;">
+            {label}
+        </button>
+        """,
+        unsafe_allow_html=True
+    )
 
 # ------------------ CRUD ------------------
 def add_facility(data, images):
     with sqlite3.connect('database.db') as conn:
         c = conn.cursor()
-        c.execute('''INSERT INTO facilities (id, name, type, lat, lon, responsible_name, responsible_dob,
-                    responsible_id_number, responsible_permanent_address, responsible_phone,
-                    responsible_id_image_path, facility_image_path, total_rooms, created_at, location_text)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                  (data['id'], data['name'], data['type'], 0, 0, data['responsible_name'],
-                   data['responsible_dob'], data['responsible_id_number'], data['responsible_permanent_address'],
-                   data['responsible_phone'], images['resp_id_img'], images['fac_img'],
-                   data['total_rooms'], data['created_at'], data['location_text']))
+        c.execute('''INSERT INTO facilities VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                  (data['id'], data['name'], data['type'], data['map_url'],
+                   data['responsible_name'], data['responsible_dob'], data['responsible_id_number'],
+                   data['responsible_permanent_address'], data['responsible_phone'],
+                   images['resp_id_img'], images['fac_img'], data['total_rooms'], data['created_at']))
         conn.commit()
     log_action(st.session_state['username'], "CREATE", "facility", data['id'], f"Tên: {data['name']}")
 
 def update_facility(data, images):
     with sqlite3.connect('database.db') as conn:
         c = conn.cursor()
-        c.execute('''UPDATE facilities SET name=?, type=?, responsible_name=?, responsible_dob=?,
-                    responsible_id_number=?, responsible_permanent_address=?, responsible_phone=?,
-                    responsible_id_image_path=?, facility_image_path=?, total_rooms=?, location_text=?
-                    WHERE id=?''',
-                  (data['name'], data['type'], data['responsible_name'], data['responsible_dob'],
-                   data['responsible_id_number'], data['responsible_permanent_address'], data['responsible_phone'],
-                   images['resp_id_img'], images['fac_img'], data['total_rooms'], data['location_text'], data['id']))
+        c.execute('''UPDATE facilities SET name=?, type=?, map_url=?,
+                     responsible_name=?, responsible_dob=?, responsible_id_number=?,
+                     responsible_permanent_address=?, responsible_phone=?,
+                     responsible_id_image_path=?, facility_image_path=?, total_rooms=?
+                     WHERE id=?''',
+                  (data['name'], data['type'], data['map_url'],
+                   data['responsible_name'], data['responsible_dob'], data['responsible_id_number'],
+                   data['responsible_permanent_address'], data['responsible_phone'],
+                   images['resp_id_img'], images['fac_img'], data['total_rooms'], data['id']))
         conn.commit()
     log_action(st.session_state['username'], "UPDATE", "facility", data['id'], f"Tên: {data['name']}")
 
@@ -207,7 +200,7 @@ def get_residents(facility_id=None, search_term=None):
         df = pd.read_sql_query(query, conn, params=params)
     return df
 
-# ------------------ LOGIN ------------------
+# ------------------ GIAO DIỆN ------------------
 def login():
     st.sidebar.title("🔐 Đăng nhập")
     username = st.sidebar.text_input("Tên đăng nhập")
@@ -238,9 +231,9 @@ def main_app():
         search_res = st.text_input("Tìm người (tên/CCCD)")
         filter_type = st.selectbox("Lọc loại cơ sở", ["Tất cả", "nhà trọ", "nhà dân", "nhà nghỉ", "khách sạn", "cơ sở tín ngưỡng", "công trường", "cơ sở khác"])
     
-    tabs = st.tabs(["🏢 Cơ sở", "👥 Người lưu trú", "📊 Thống kê & Báo cáo", "📜 Nhật ký hệ thống"])
+    tabs = st.tabs(["🏢 Cơ sở", "👥 Người lưu trú", "📊 Thống kê", "📜 Nhật ký"])
     
-    # TAB 1: CƠ SỞ
+    # ------------------ TAB 1: CƠ SỞ ------------------
     with tabs[0]:
         st.subheader("📋 Danh sách cơ sở")
         facilities_df = get_facilities(search_term=search_fac, filter_type=filter_type)
@@ -256,18 +249,14 @@ def main_app():
                         else:
                             st.image("https://placehold.co/150x100?text=No+Image", width=150)
                     with col2:
-                        st.write(f"📍 Vị trí: {row['location_text'] if row['location_text'] else 'Chưa có'}")
-                        if row['location_text']:
-                            # Nút copy
-                            if st.button("📋 Sao chép vị trí", key=f"copy_{row['id']}"):
-                                st.markdown(f"""
-                                    <script>
-                                    navigator.clipboard.writeText(`{row['location_text']}`);
-                                    </script>
-                                """, unsafe_allow_html=True)
-                                st.success("Đã sao chép vị trí vào clipboard!")
-                        st.write(f"👤 Chịu trách nhiệm: {row['responsible_name']} - {row['responsible_phone']}")
-                        st.write(f"🚪 Tổng phòng: {row['total_rooms']}")
+                        st.write(f"📍 **Vị trí Google Maps:**")
+                        if row['map_url']:
+                            st.markdown(f"[Mở bản đồ]({row['map_url']})")
+                            copy_button(row['map_url'], "📋 Copy URL vị trí")
+                        else:
+                            st.write("Chưa có URL")
+                        st.write(f"👤 **Chịu trách nhiệm:** {row['responsible_name']} - {row['responsible_phone']}")
+                        st.write(f"🚪 **Tổng phòng:** {row['total_rooms']}")
                         col_a, col_b, col_c = st.columns(3)
                         if col_a.button("✏️ Sửa", key=f"edit_fac_{row['id']}"):
                             st.session_state['edit_facility'] = row.to_dict()
@@ -277,7 +266,9 @@ def main_app():
                             st.success("Đã xóa cơ sở!")
                             st.rerun()
                         if col_c.button("👥 Xem người", key=f"view_res_{row['id']}"):
+                            # Lưu id cơ sở cần xem và chuyển tab
                             st.session_state['view_facility_id'] = row['id']
+                            st.session_state['active_tab'] = 1  # tab index 1
                             st.rerun()
         st.markdown("---")
         if 'edit_facility' in st.session_state:
@@ -291,11 +282,8 @@ def main_app():
             name = st.text_input("Tên cơ sở *", value=fac['name'] if fac else "")
             type_opt = ["nhà trọ", "nhà dân", "nhà nghỉ", "khách sạn", "cơ sở tín ngưỡng", "công trường", "cơ sở khác"]
             type_ = st.selectbox("Loại hình", type_opt, index=type_opt.index(fac['type']) if fac and fac['type'] in type_opt else 0)
-            
-            # Ô nhập vị trí (URL Google Maps hoặc chuỗi tọa độ)
-            location_text = st.text_input("📍 Vị trí (dán link Google Maps hoặc tọa độ)", 
-                                          value=fac['location_text'] if fac and fac['location_text'] else "")
-            st.caption("Hướng dẫn: Trên Google Maps, nhấn 'Chia sẻ' → 'Sao chép liên kết' rồi dán vào đây. Hoặc nhập tọa độ dạng '21.0285, 105.8542'")
+            map_url = st.text_input("Đường dẫn Google Maps", value=fac['map_url'] if fac else "")
+            st.caption("Trên điện thoại: Mở Google Maps → Chia sẻ vị trí → Sao chép liên kết → Dán vào đây")
             
             st.markdown("**👤 Người chịu trách nhiệm**")
             resp_name = st.text_input("Họ tên *", value=fac['responsible_name'] if fac else "")
@@ -315,7 +303,7 @@ def main_app():
                 elif resp_id_num and not validate_cccd(resp_id_num):
                     st.error("Số căn cước phải đúng 12 chữ số.")
                 elif resp_phone and not validate_phone(resp_phone):
-                    st.error("Số điện thoại không hợp lệ (Việt Nam).")
+                    st.error("Số điện thoại không hợp lệ.")
                 else:
                     resp_img_path = save_uploaded_file(resp_id_img, "id_cards") if resp_id_img else (fac['responsible_id_image_path'] if fac else "")
                     fac_img_path = save_uploaded_file(fac_img, "facilities") if fac_img else (fac['facility_image_path'] if fac else "")
@@ -323,14 +311,14 @@ def main_app():
                         'id': fac['id'] if fac else str(uuid.uuid4()),
                         'name': name,
                         'type': type_,
+                        'map_url': map_url,
                         'responsible_name': resp_name,
                         'responsible_dob': resp_dob.strftime("%Y-%m-%d"),
                         'responsible_id_number': resp_id_num,
                         'responsible_permanent_address': resp_perm_addr,
                         'responsible_phone': resp_phone,
                         'total_rooms': total_rooms,
-                        'created_at': datetime.now().isoformat(),
-                        'location_text': location_text
+                        'created_at': datetime.now().isoformat()
                     }
                     images = {'resp_id_img': resp_img_path, 'fac_img': fac_img_path}
                     if fac:
@@ -345,23 +333,54 @@ def main_app():
                 del st.session_state['edit_facility']
                 st.rerun()
     
-    # TAB 2: NGƯỜI LƯU TRÚ (giữ nguyên như cũ, chỉ thay đổi ngày tháng)
+    # ------------------ TAB 2: NGƯỜI LƯU TRÚ ------------------
     with tabs[1]:
-        st.subheader("👥 Quản lý người tạm trú/lưu trú")
+        st.subheader("👥 Quản lý người tạm trú/lưu trú và người khác")
+        
+        # Xử lý chuyển tab từ nút "Xem người"
+        if 'active_tab' in st.session_state and st.session_state.get('active_tab') == 1:
+            default_facility_id = st.session_state.get('view_facility_id')
+            # Xóa để không ảnh hưởng lần sau
+            st.session_state.pop('active_tab', None)
+            st.session_state.pop('view_facility_id', None)
+        else:
+            default_facility_id = None
+        
         facilities_df = get_facilities()
         if facilities_df.empty:
             st.warning("Chưa có cơ sở nào. Hãy thêm cơ sở trước.")
         else:
             fac_options = {row['name']: row['id'] for _, row in facilities_df.iterrows()}
-            selected_fac_name = st.selectbox("Chọn cơ sở", list(fac_options.keys()), key="fac_select")
+            # Xác định index mặc định
+            default_index = 0
+            if default_facility_id:
+                for i, (name, fid) in enumerate(fac_options.items()):
+                    if fid == default_facility_id:
+                        default_index = i
+                        break
+            selected_fac_name = st.selectbox("Chọn cơ sở", list(fac_options.keys()), index=default_index, key="fac_select")
             selected_fac_id = fac_options[selected_fac_name]
+            
             search_local = st.text_input("🔍 Tìm người trong cơ sở này (tên/CCCD)", key="search_res_local")
             residents_df = get_residents(selected_fac_id, search_term=search_local if search_local else None)
             today = date.today()
+            
             if not residents_df.empty:
+                # Phân loại: Tạm trú/Lưu trú có end_date, Người khác không có end_date (NULL hoặc rỗng)
                 residents_df['end_date_dt'] = residents_df['end_date'].apply(safe_parse_date)
-                current = residents_df[residents_df['end_date_dt'] >= today] if not residents_df['end_date_dt'].isna().all() else pd.DataFrame()
-                past = residents_df[residents_df['end_date_dt'] < today] if not residents_df['end_date_dt'].isna().all() else pd.DataFrame()
+                # Người có end_date >= today hoặc end_date null? 
+                # Người khác (note_type='Người khác') sẽ được hiển thị riêng
+                temp_res = residents_df[residents_df['note_type'].isin(['Tạm trú', 'Lưu trú'])]
+                other_res = residents_df[residents_df['note_type'] == 'Người khác']
+                
+                if not temp_res.empty:
+                    temp_res['end_date_dt'] = temp_res['end_date'].apply(safe_parse_date)
+                    current = temp_res[temp_res['end_date_dt'] >= today]
+                    past = temp_res[temp_res['end_date_dt'] < today]
+                else:
+                    current = pd.DataFrame()
+                    past = pd.DataFrame()
+                
                 st.markdown("### 🟢 Đang lưu trú/tạm trú")
                 if current.empty:
                     st.info("Không có ai đang ở.")
@@ -381,11 +400,13 @@ def main_app():
                             col_a, col_b = st.columns(2)
                             if col_a.button("✏️ Sửa", key=f"edit_res_{r['id']}"):
                                 st.session_state['edit_resident'] = r.to_dict()
+                                st.session_state['edit_facility_id'] = selected_fac_id
                                 st.rerun()
                             if col_b.button("🗑️ Xóa", key=f"del_res_{r['id']}"):
                                 delete_resident(r['id'])
                                 st.success("Đã xóa!")
                                 st.rerun()
+                
                 st.markdown("### 🔴 Đã từng lưu trú")
                 if past.empty:
                     st.info("Chưa có người đã hết hạn.")
@@ -394,43 +415,73 @@ def main_app():
                         with st.expander(f"{r['fullname']} - Đã rời ngày {r['end_date']}"):
                             st.write(f"**Phòng:** {r['room_number']}, **Loại:** {r['note_type']}")
                             st.write(f"**SĐT:** {r['phone']}")
+                
+                st.markdown("### 👥 Người khác (vãng lai, không tạm trú)")
+                if other_res.empty:
+                    st.info("Chưa có người khác được ghi nhận.")
+                else:
+                    for _, r in other_res.iterrows():
+                        with st.expander(f"{r['fullname']} - {r['phone']}"):
+                            col1, col2 = st.columns([1,2])
+                            with col1:
+                                if r['id_image_path'] and os.path.exists(r['id_image_path']):
+                                    st.image(r['id_image_path'], width=120)
+                            with col2:
+                                st.write(f"**Sinh:** {r['dob']}")
+                                st.write(f"**CCCD:** {r['id_number']}")
+                                st.write(f"**ĐKTT:** {r['permanent_address']}")
+                                st.write(f"**Ghi chú:** {r['room_number']}")  # dùng room_number làm ghi chú
+                            col_a, col_b = st.columns(2)
+                            if col_a.button("✏️ Sửa", key=f"edit_other_{r['id']}"):
+                                st.session_state['edit_resident'] = r.to_dict()
+                                st.session_state['edit_facility_id'] = selected_fac_id
+                                st.rerun()
+                            if col_b.button("🗑️ Xóa", key=f"del_other_{r['id']}"):
+                                delete_resident(r['id'])
+                                st.success("Đã xóa!")
+                                st.rerun()
             else:
                 st.info("Không có người nào trong cơ sở này.")
+            
             st.markdown("---")
-            if 'edit_resident' in st.session_state:
-                st.subheader("✏️ Sửa thông tin người")
-                res = st.session_state['edit_resident']
-            else:
-                st.subheader("➕ Thêm người mới")
-                res = None
-            with st.form("resident_form", clear_on_submit=not res):
-                fullname = st.text_input("Họ tên *", value=res['fullname'] if res else "")
-                default_dob = safe_parse_date(res['dob']) if res and res['dob'] else date.today()
-                dob = st.date_input("Sinh ngày", value=default_dob, format="DD/MM/YYYY")
-                id_number = st.text_input("Số căn cước (12 số)", value=res['id_number'] if res else "")
-                perm_addr = st.text_area("Nơi đăng ký thường trú", value=res['permanent_address'] if res else "")
+            st.subheader("➕ Thêm người mới")
+            with st.form("resident_form", clear_on_submit=True):
+                fullname = st.text_input("Họ tên *")
+                dob = st.date_input("Sinh ngày", value=date.today(), format="DD/MM/YYYY")
+                id_number = st.text_input("Số căn cước (12 số)")
+                perm_addr = st.text_area("Nơi đăng ký thường trú")
                 id_img = st.file_uploader("Ảnh căn cước", type=["jpg","png","jpeg"], key="resident_id")
-                phone = st.text_input("Số điện thoại", value=res['phone'] if res else "")
-                room = st.text_input("Số phòng *", value=res['room_number'] if res else "")
-                default_start = safe_parse_date(res['start_date']) if res and res['start_date'] else date.today()
-                default_end = safe_parse_date(res['end_date']) if res and res['end_date'] else date.today()
-                start_date = st.date_input("Ngày bắt đầu", value=default_start, format="DD/MM/YYYY")
-                end_date = st.date_input("Ngày kết thúc", value=default_end, format="DD/MM/YYYY")
-                note_type = st.radio("Loại hình", ["Tạm trú", "Lưu trú"], index=0 if not res else (0 if res['note_type']=="Tạm trú" else 1))
+                phone = st.text_input("Số điện thoại")
+                room = st.text_input("Số phòng / Ghi chú", help="Đối với người tạm trú/lưu trú: nhập số phòng. Đối với người khác: có thể nhập ghi chú.")
+                note_type = st.radio("Loại hình", ["Tạm trú", "Lưu trú", "Người khác"], index=0)
+                
+                start_date = None
+                end_date = None
+                if note_type != "Người khác":
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        start_date = st.date_input("Ngày bắt đầu", value=date.today(), format="DD/MM/YYYY")
+                    with col2:
+                        end_date = st.date_input("Ngày kết thúc", value=date.today() + timedelta(days=30), format="DD/MM/YYYY")
+                else:
+                    st.info("Người khác không cần nhập ngày tháng.")
+                
                 submitted = st.form_submit_button("✅ Lưu người")
                 if submitted:
-                    if not fullname or not room:
-                        st.error("Họ tên và số phòng là bắt buộc.")
+                    if not fullname:
+                        st.error("Họ tên là bắt buộc.")
                     elif id_number and not validate_cccd(id_number):
                         st.error("Căn cước phải 12 chữ số.")
                     elif phone and not validate_phone(phone):
                         st.error("Số điện thoại không hợp lệ.")
-                    elif end_date <= start_date:
+                    elif note_type != "Người khác" and (start_date is None or end_date is None):
+                        st.error("Vui lòng nhập ngày bắt đầu và kết thúc.")
+                    elif note_type != "Người khác" and end_date <= start_date:
                         st.error("Ngày kết thúc phải sau ngày bắt đầu.")
                     else:
-                        img_path = save_uploaded_file(id_img, "id_cards") if id_img else (res['id_image_path'] if res else "")
+                        img_path = save_uploaded_file(id_img, "id_cards") if id_img else ""
                         data_res = {
-                            'id': res['id'] if res else str(uuid.uuid4()),
+                            'id': str(uuid.uuid4()),
                             'facility_id': selected_fac_id,
                             'fullname': fullname,
                             'dob': dob.strftime("%Y-%m-%d"),
@@ -438,64 +489,141 @@ def main_app():
                             'permanent_address': perm_addr,
                             'phone': phone,
                             'room_number': room,
-                            'start_date': start_date.strftime("%Y-%m-%d"),
-                            'end_date': end_date.strftime("%Y-%m-%d"),
+                            'start_date': start_date.strftime("%Y-%m-%d") if start_date else None,
+                            'end_date': end_date.strftime("%Y-%m-%d") if end_date else None,
                             'note_type': note_type,
                             'created_at': datetime.now().isoformat()
                         }
-                        if res:
+                        add_resident(data_res, img_path)
+                        st.success("Thêm mới thành công!")
+                        st.rerun()
+            
+            # Form sửa người (nếu có edit_resident)
+            if 'edit_resident' in st.session_state:
+                st.markdown("---")
+                st.subheader("✏️ Sửa thông tin người")
+                res = st.session_state['edit_resident']
+                with st.form("edit_resident_form", clear_on_submit=False):
+                    fullname = st.text_input("Họ tên *", value=res['fullname'])
+                    dob = st.date_input("Sinh ngày", value=safe_parse_date(res['dob']) or date.today(), format="DD/MM/YYYY")
+                    id_number = st.text_input("Số căn cước (12 số)", value=res['id_number'] if res['id_number'] else "")
+                    perm_addr = st.text_area("Nơi đăng ký thường trú", value=res['permanent_address'] if res['permanent_address'] else "")
+                    id_img = st.file_uploader("Ảnh căn cước (để trống nếu không đổi)", type=["jpg","png","jpeg"], key="edit_resident_id")
+                    phone = st.text_input("Số điện thoại", value=res['phone'] if res['phone'] else "")
+                    room = st.text_input("Số phòng / Ghi chú", value=res['room_number'] if res['room_number'] else "")
+                    note_type = st.radio("Loại hình", ["Tạm trú", "Lưu trú", "Người khác"], index=["Tạm trú","Lưu trú","Người khác"].index(res['note_type']))
+                    
+                    start_date = None
+                    end_date = None
+                    if note_type != "Người khác":
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            start_date = st.date_input("Ngày bắt đầu", value=safe_parse_date(res['start_date']) or date.today(), format="DD/MM/YYYY")
+                        with col2:
+                            end_date = st.date_input("Ngày kết thúc", value=safe_parse_date(res['end_date']) or (date.today() + timedelta(days=30)), format="DD/MM/YYYY")
+                    else:
+                        st.info("Người khác không cần nhập ngày tháng.")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        submitted = st.form_submit_button("✅ Cập nhật")
+                    with col2:
+                        cancel = st.form_submit_button("❌ Hủy")
+                    
+                    if submitted:
+                        if not fullname:
+                            st.error("Họ tên là bắt buộc.")
+                        elif id_number and not validate_cccd(id_number):
+                            st.error("Căn cước phải 12 chữ số.")
+                        elif phone and not validate_phone(phone):
+                            st.error("Số điện thoại không hợp lệ.")
+                        elif note_type != "Người khác" and (start_date is None or end_date is None):
+                            st.error("Vui lòng nhập ngày bắt đầu và kết thúc.")
+                        elif note_type != "Người khác" and end_date <= start_date:
+                            st.error("Ngày kết thúc phải sau ngày bắt đầu.")
+                        else:
+                            img_path = save_uploaded_file(id_img, "id_cards") if id_img else res['id_image_path']
+                            data_res = {
+                                'id': res['id'],
+                                'facility_id': res['facility_id'],
+                                'fullname': fullname,
+                                'dob': dob.strftime("%Y-%m-%d"),
+                                'id_number': id_number,
+                                'permanent_address': perm_addr,
+                                'phone': phone,
+                                'room_number': room,
+                                'start_date': start_date.strftime("%Y-%m-%d") if start_date else None,
+                                'end_date': end_date.strftime("%Y-%m-%d") if end_date else None,
+                                'note_type': note_type,
+                                'created_at': res['created_at']
+                            }
                             update_resident(data_res, img_path)
                             st.success("Cập nhật thành công!")
                             del st.session_state['edit_resident']
-                        else:
-                            add_resident(data_res, img_path)
-                            st.success("Thêm mới thành công!")
+                            st.rerun()
+                    if cancel:
+                        del st.session_state['edit_resident']
                         st.rerun()
-                if res and st.form_submit_button("❌ Hủy sửa"):
-                    del st.session_state['edit_resident']
-                    st.rerun()
     
-    # TAB 3: THỐNG KÊ
+    # ------------------ TAB 3: THỐNG KÊ ------------------
     with tabs[2]:
         st.subheader("📊 Thống kê tổng quan")
         all_res = get_residents()
         all_fac = get_facilities()
         today = date.today()
         if not all_res.empty:
-            all_res['end_date_dt'] = all_res['end_date'].apply(safe_parse_date)
-            current_count = len(all_res[all_res['end_date_dt'] >= today])
-            expired_count = len(all_res[all_res['end_date_dt'] < today])
-            soon_count = len(all_res[(all_res['end_date_dt'] >= today) & (all_res['end_date_dt'] <= today + timedelta(days=7))])
+            # Chỉ tính Tạm trú/Lưu trú cho các chỉ số
+            temp_res = all_res[all_res['note_type'].isin(['Tạm trú', 'Lưu trú'])].copy()
+            if not temp_res.empty:
+                temp_res['end_date_dt'] = temp_res['end_date'].apply(safe_parse_date)
+                current_count = len(temp_res[temp_res['end_date_dt'] >= today])
+                expired_count = len(temp_res[temp_res['end_date_dt'] < today])
+                soon_count = len(temp_res[(temp_res['end_date_dt'] >= today) & (temp_res['end_date_dt'] <= today + timedelta(days=7))])
+            else:
+                current_count = expired_count = soon_count = 0
+            other_count = len(all_res[all_res['note_type'] == 'Người khác'])
         else:
-            current_count = expired_count = soon_count = 0
-        col1, col2, col3, col4 = st.columns(4)
+            current_count = expired_count = soon_count = other_count = 0
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("🏢 Tổng cơ sở", len(all_fac))
         col2.metric("👥 Đang lưu trú", current_count)
-        col3.metric("⏰ Sắp hết hạn (<7 ngày)", soon_count, delta="cần theo dõi")
+        col3.metric("⏰ Sắp hết hạn", soon_count, delta="<7 ngày")
         col4.metric("📜 Đã rời đi", expired_count)
+        col5.metric("👤 Người khác", other_count)
+        
         if not all_fac.empty:
             fig_type = px.bar(all_fac, x='type', title="Số lượng cơ sở theo loại hình", color='type', text_auto=True)
             st.plotly_chart(fig_type, use_container_width=True)
+        
         if not all_res.empty:
-            fig_pie = px.pie(all_res, names='note_type', title="Tỷ lệ Tạm trú / Lưu trú", hole=0.4)
+            # Biểu đồ tròn cho các loại
+            fig_pie = px.pie(all_res, names='note_type', title="Tỷ lệ các loại đối tượng", hole=0.4)
             st.plotly_chart(fig_pie, use_container_width=True)
+        
         if not all_res.empty and not all_fac.empty:
             res_fac = all_res.merge(all_fac[['id','name']], left_on='facility_id', right_on='id', how='left')
             top_fac = res_fac['name'].value_counts().head(10).reset_index()
             top_fac.columns = ['Cơ sở', 'Số người']
             fig_top = px.bar(top_fac, x='Cơ sở', y='Số người', title="Top 10 cơ sở đông người nhất")
             st.plotly_chart(fig_top, use_container_width=True)
+        
         st.subheader("⚠️ Danh sách người sắp hết hạn (dưới 7 ngày)")
         if not all_res.empty:
-            soon_list = all_res[(all_res['end_date_dt'] >= today) & (all_res['end_date_dt'] <= today + timedelta(days=7))]
-            if soon_list.empty:
-                st.info("Không có ai sắp hết hạn.")
+            temp_res = all_res[all_res['note_type'].isin(['Tạm trú', 'Lưu trú'])].copy()
+            if not temp_res.empty:
+                temp_res['end_date_dt'] = temp_res['end_date'].apply(safe_parse_date)
+                soon_list = temp_res[(temp_res['end_date_dt'] >= today) & (temp_res['end_date_dt'] <= today + timedelta(days=7))]
+                if soon_list.empty:
+                    st.info("Không có ai sắp hết hạn.")
+                else:
+                    for _, r in soon_list.iterrows():
+                        fac_name = all_fac[all_fac['id']==r['facility_id']]['name'].values[0] if not all_fac.empty else "Không rõ"
+                        st.write(f"- **{r['fullname']}** - {r['phone']} - {fac_name} - Hết hạn: {r['end_date']}")
             else:
-                for _, r in soon_list.iterrows():
-                    fac_name = all_fac[all_fac['id']==r['facility_id']]['name'].values[0] if not all_fac.empty else "Không rõ"
-                    st.write(f"- **{r['fullname']}** - {r['phone']} - {fac_name} - Hết hạn: {r['end_date']}")
+                st.info("Không có dữ liệu tạm trú/lưu trú.")
     
-    # TAB 4: NHẬT KÝ
+    # ------------------ TAB 4: NHẬT KÝ ------------------
     with tabs[3]:
         st.subheader("📜 Nhật ký hoạt động")
         with sqlite3.connect('database.db') as conn:
@@ -505,6 +633,7 @@ def main_app():
         else:
             st.dataframe(logs_df, use_container_width=True, height=500)
 
+# ------------------ KHỞI ĐỘNG ------------------
 def main():
     init_db()
     if 'logged_in' not in st.session_state:
