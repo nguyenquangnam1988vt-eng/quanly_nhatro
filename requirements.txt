@@ -3,3 +3,4 @@ streamlit-js-eval
 pandas
 Pillow
 plotly
+pyperclip
