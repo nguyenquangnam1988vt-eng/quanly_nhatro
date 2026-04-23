@@ -12,7 +12,6 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="QL Lưu trú Pro", page_icon="🏨", layout="wide", initial_sidebar_state="collapsed")
 
-# CSS mobile
 st.markdown("""
     <style>
         @media (max-width: 768px) {
@@ -29,13 +28,18 @@ def init_db():
     with sqlite3.connect('database.db') as conn:
         c = conn.cursor()
         c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
+        # Tạo bảng facilities với cột map_url (nếu chưa có)
         c.execute('''CREATE TABLE IF NOT EXISTS facilities (
             id TEXT PRIMARY KEY, name TEXT, type TEXT, map_url TEXT,
             responsible_name TEXT, responsible_dob TEXT, responsible_id_number TEXT,
             responsible_permanent_address TEXT, responsible_phone TEXT,
             responsible_id_image_path TEXT, facility_image_path TEXT,
             total_rooms INTEGER, created_at TEXT)''')
-        # Bảng residents mở rộng: cho phép start_date, end_date NULL nếu note_type = 'Người khác'
+        # Thêm cột map_url nếu bảng đã tồn tại nhưng thiếu cột
+        try:
+            c.execute("ALTER TABLE facilities ADD COLUMN map_url TEXT")
+        except sqlite3.OperationalError:
+            pass  # cột đã tồn tại
         c.execute('''CREATE TABLE IF NOT EXISTS residents (
             id TEXT PRIMARY KEY, facility_id TEXT, fullname TEXT, dob TEXT,
             id_number TEXT, permanent_address TEXT, id_image_path TEXT,
@@ -181,6 +185,9 @@ def get_facilities(search_term=None, filter_type=None):
     query += " ORDER BY created_at DESC"
     with sqlite3.connect('database.db') as conn:
         df = pd.read_sql_query(query, conn, params=params)
+    # Đảm bảo cột map_url tồn tại
+    if 'map_url' not in df.columns:
+        df['map_url'] = None
     return df
 
 def get_residents(facility_id=None, search_term=None):
@@ -250,9 +257,10 @@ def main_app():
                             st.image("https://placehold.co/150x100?text=No+Image", width=150)
                     with col2:
                         st.write(f"📍 **Vị trí Google Maps:**")
-                        if row['map_url']:
-                            st.markdown(f"[Mở bản đồ]({row['map_url']})")
-                            copy_button(row['map_url'], "📋 Copy URL vị trí")
+                        map_url = row.get('map_url') if 'map_url' in row else None
+                        if map_url and isinstance(map_url, str) and map_url.strip():
+                            st.markdown(f"[Mở bản đồ]({map_url})")
+                            copy_button(map_url, "📋 Copy URL vị trí")
                         else:
                             st.write("Chưa có URL")
                         st.write(f"👤 **Chịu trách nhiệm:** {row['responsible_name']} - {row['responsible_phone']}")
@@ -266,9 +274,8 @@ def main_app():
                             st.success("Đã xóa cơ sở!")
                             st.rerun()
                         if col_c.button("👥 Xem người", key=f"view_res_{row['id']}"):
-                            # Lưu id cơ sở cần xem và chuyển tab
                             st.session_state['view_facility_id'] = row['id']
-                            st.session_state['active_tab'] = 1  # tab index 1
+                            st.session_state['active_tab'] = 1
                             st.rerun()
         st.markdown("---")
         if 'edit_facility' in st.session_state:
@@ -282,7 +289,7 @@ def main_app():
             name = st.text_input("Tên cơ sở *", value=fac['name'] if fac else "")
             type_opt = ["nhà trọ", "nhà dân", "nhà nghỉ", "khách sạn", "cơ sở tín ngưỡng", "công trường", "cơ sở khác"]
             type_ = st.selectbox("Loại hình", type_opt, index=type_opt.index(fac['type']) if fac and fac['type'] in type_opt else 0)
-            map_url = st.text_input("Đường dẫn Google Maps", value=fac['map_url'] if fac else "")
+            map_url = st.text_input("Đường dẫn Google Maps", value=fac.get('map_url') if fac else "")
             st.caption("Trên điện thoại: Mở Google Maps → Chia sẻ vị trí → Sao chép liên kết → Dán vào đây")
             
             st.markdown("**👤 Người chịu trách nhiệm**")
@@ -340,7 +347,6 @@ def main_app():
         # Xử lý chuyển tab từ nút "Xem người"
         if 'active_tab' in st.session_state and st.session_state.get('active_tab') == 1:
             default_facility_id = st.session_state.get('view_facility_id')
-            # Xóa để không ảnh hưởng lần sau
             st.session_state.pop('active_tab', None)
             st.session_state.pop('view_facility_id', None)
         else:
@@ -351,7 +357,6 @@ def main_app():
             st.warning("Chưa có cơ sở nào. Hãy thêm cơ sở trước.")
         else:
             fac_options = {row['name']: row['id'] for _, row in facilities_df.iterrows()}
-            # Xác định index mặc định
             default_index = 0
             if default_facility_id:
                 for i, (name, fid) in enumerate(fac_options.items()):
@@ -366,11 +371,8 @@ def main_app():
             today = date.today()
             
             if not residents_df.empty:
-                # Phân loại: Tạm trú/Lưu trú có end_date, Người khác không có end_date (NULL hoặc rỗng)
-                residents_df['end_date_dt'] = residents_df['end_date'].apply(safe_parse_date)
-                # Người có end_date >= today hoặc end_date null? 
-                # Người khác (note_type='Người khác') sẽ được hiển thị riêng
-                temp_res = residents_df[residents_df['note_type'].isin(['Tạm trú', 'Lưu trú'])]
+                # Phân loại
+                temp_res = residents_df[residents_df['note_type'].isin(['Tạm trú', 'Lưu trú'])].copy()
                 other_res = residents_df[residents_df['note_type'] == 'Người khác']
                 
                 if not temp_res.empty:
@@ -430,7 +432,7 @@ def main_app():
                                 st.write(f"**Sinh:** {r['dob']}")
                                 st.write(f"**CCCD:** {r['id_number']}")
                                 st.write(f"**ĐKTT:** {r['permanent_address']}")
-                                st.write(f"**Ghi chú:** {r['room_number']}")  # dùng room_number làm ghi chú
+                                st.write(f"**Ghi chú:** {r['room_number']}")
                             col_a, col_b = st.columns(2)
                             if col_a.button("✏️ Sửa", key=f"edit_other_{r['id']}"):
                                 st.session_state['edit_resident'] = r.to_dict()
@@ -498,7 +500,7 @@ def main_app():
                         st.success("Thêm mới thành công!")
                         st.rerun()
             
-            # Form sửa người (nếu có edit_resident)
+            # Form sửa người
             if 'edit_resident' in st.session_state:
                 st.markdown("---")
                 st.subheader("✏️ Sửa thông tin người")
@@ -572,7 +574,6 @@ def main_app():
         all_fac = get_facilities()
         today = date.today()
         if not all_res.empty:
-            # Chỉ tính Tạm trú/Lưu trú cho các chỉ số
             temp_res = all_res[all_res['note_type'].isin(['Tạm trú', 'Lưu trú'])].copy()
             if not temp_res.empty:
                 temp_res['end_date_dt'] = temp_res['end_date'].apply(safe_parse_date)
@@ -584,30 +585,20 @@ def main_app():
             other_count = len(all_res[all_res['note_type'] == 'Người khác'])
         else:
             current_count = expired_count = soon_count = other_count = 0
-        
         col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("🏢 Tổng cơ sở", len(all_fac))
         col2.metric("👥 Đang lưu trú", current_count)
-        col3.metric("⏰ Sắp hết hạn", soon_count, delta="<7 ngày")
+        col3.metric("⏰ Sắp hết hạn", soon_count)
         col4.metric("📜 Đã rời đi", expired_count)
-        col5.metric("👤 Người khác", other_count)
-        
+        col5.metric("📝 Người khác", other_count)
         if not all_fac.empty:
             fig_type = px.bar(all_fac, x='type', title="Số lượng cơ sở theo loại hình", color='type', text_auto=True)
             st.plotly_chart(fig_type, use_container_width=True)
-        
         if not all_res.empty:
-            # Biểu đồ tròn cho các loại
-            fig_pie = px.pie(all_res, names='note_type', title="Tỷ lệ các loại đối tượng", hole=0.4)
+            note_counts = all_res['note_type'].value_counts().reset_index()
+            note_counts.columns = ['Loại', 'Số lượng']
+            fig_pie = px.pie(note_counts, names='Loại', values='Số lượng', title="Phân loại người", hole=0.4)
             st.plotly_chart(fig_pie, use_container_width=True)
-        
-        if not all_res.empty and not all_fac.empty:
-            res_fac = all_res.merge(all_fac[['id','name']], left_on='facility_id', right_on='id', how='left')
-            top_fac = res_fac['name'].value_counts().head(10).reset_index()
-            top_fac.columns = ['Cơ sở', 'Số người']
-            fig_top = px.bar(top_fac, x='Cơ sở', y='Số người', title="Top 10 cơ sở đông người nhất")
-            st.plotly_chart(fig_top, use_container_width=True)
-        
         st.subheader("⚠️ Danh sách người sắp hết hạn (dưới 7 ngày)")
         if not all_res.empty:
             temp_res = all_res[all_res['note_type'].isin(['Tạm trú', 'Lưu trú'])].copy()
@@ -633,7 +624,6 @@ def main_app():
         else:
             st.dataframe(logs_df, use_container_width=True, height=500)
 
-# ------------------ KHỞI ĐỘNG ------------------
 def main():
     init_db()
     if 'logged_in' not in st.session_state:
