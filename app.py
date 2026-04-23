@@ -7,7 +7,6 @@ import uuid
 import re
 import mimetypes
 from PIL import Image
-import streamlit_js_eval as sje
 import plotly.express as px
 import plotly.graph_objects as go
 
@@ -27,7 +26,6 @@ st.markdown("""
             .stTextInput, .stSelectbox, .stDateInput, .stTextArea, .stNumberInput { font-size: 0.9rem; }
             h1 { font-size: 1.8rem; }
             h2 { font-size: 1.4rem; }
-            .css-1v3fvcr, .css-1adrfps { padding: 8px; margin-bottom: 8px; }
         }
         .metric-card {
             background-color: #f0f2f6;
@@ -36,7 +34,6 @@ st.markdown("""
             text-align: center;
             box-shadow: 0 1px 3px rgba(0,0,0,0.1);
         }
-        .st-emotion-cache-1v0mbdj { padding: 1rem; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -44,34 +41,28 @@ st.markdown("""
 def init_db():
     with sqlite3.connect('database.db') as conn:
         c = conn.cursor()
-        # Users
         c.execute('''CREATE TABLE IF NOT EXISTS users (
             username TEXT PRIMARY KEY, password TEXT)''')
-        # Facilities
         c.execute('''CREATE TABLE IF NOT EXISTS facilities (
             id TEXT PRIMARY KEY, name TEXT, type TEXT, lat REAL, lon REAL,
             responsible_name TEXT, responsible_dob TEXT, responsible_id_number TEXT,
             responsible_permanent_address TEXT, responsible_phone TEXT,
             responsible_id_image_path TEXT, facility_image_path TEXT,
             total_rooms INTEGER, created_at TEXT)''')
-        # Residents
         c.execute('''CREATE TABLE IF NOT EXISTS residents (
             id TEXT PRIMARY KEY, facility_id TEXT, fullname TEXT, dob TEXT,
             id_number TEXT, permanent_address TEXT, id_image_path TEXT,
             phone TEXT, room_number TEXT, start_date TEXT, end_date TEXT,
             note_type TEXT, created_at TEXT,
             FOREIGN KEY (facility_id) REFERENCES facilities(id))''')
-        # Audit logs
         c.execute('''CREATE TABLE IF NOT EXISTS logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT, action TEXT, target_type TEXT, target_id TEXT,
             timestamp TEXT, details TEXT)''')
-        # Indexes
         c.execute("CREATE INDEX IF NOT EXISTS idx_res_facility ON residents(facility_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_res_id_number ON residents(id_number)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_res_end_date ON residents(end_date)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_fac_type ON facilities(type)")
-        # User mặc định
         c.execute("SELECT * FROM users WHERE username='admin'")
         if not c.fetchone():
             c.execute("INSERT INTO users VALUES ('admin', '123')")
@@ -86,7 +77,6 @@ def log_action(username, action, target_type, target_id, details=""):
 
 # ------------------ HÀM XỬ LÝ AN TOÀN ------------------
 def safe_parse_date(date_str):
-    """Chuyển đổi date string an toàn, trả về date hoặc None"""
     if not date_str or pd.isna(date_str):
         return None
     try:
@@ -130,23 +120,66 @@ def save_uploaded_file(uploaded_file, subfolder=""):
         f.write(uploaded_file.getbuffer())
     return file_path
 
-def get_current_location():
-    """Lấy GPS với fallback và thông báo lỗi"""
-    try:
-        location = sje.get_geolocation()
-        if location is None:
-            st.warning("Không thể truy cập GPS. Vui lòng cho phép quyền hoặc nhập tay.")
-            return None, None
-        if 'coords' in location:
-            lat = location['coords']['latitude']
-            lon = location['coords']['longitude']
-            if lat and lon:
-                return lat, lon
-        st.warning("Không lấy được tọa độ. Vui lòng nhập tay.")
-        return None, None
-    except Exception as e:
-        st.warning(f"Lỗi GPS: {str(e)}")
-        return None, None
+# ------------------ GPS BẰNG HTML5 GEOLOCATION ------------------
+def gps_component():
+    """Tạo component HTML lấy GPS, lưu vào query_params"""
+    components_html = """
+    <div id="gps-container" style="margin-bottom: 10px;">
+        <button id="get-gps" style="background-color:#4CAF50; color:white; padding:10px; border:none; border-radius:5px; font-size:16px; cursor:pointer;">
+            📍 Lấy vị trí GPS hiện tại
+        </button>
+        <div id="status" style="margin-top:8px; font-size:14px; color:#666;"></div>
+    </div>
+    <script>
+    document.getElementById('get-gps').addEventListener('click', function() {
+        var statusDiv = document.getElementById('status');
+        statusDiv.innerHTML = 'Đang lấy vị trí...';
+        if (!navigator.geolocation) {
+            statusDiv.innerHTML = '❌ Trình duyệt không hỗ trợ GPS';
+            return;
+        }
+        navigator.geolocation.getCurrentPosition(
+            function(pos) {
+                var lat = pos.coords.latitude;
+                var lon = pos.coords.longitude;
+                // Chuyển hướng đến cùng URL với query params
+                var url = new URL(window.location.href);
+                url.searchParams.set('lat', lat);
+                url.searchParams.set('lon', lon);
+                window.location.href = url.href;
+            },
+            function(err) {
+                var msg = '';
+                switch(err.code) {
+                    case err.PERMISSION_DENIED: msg = 'Người dùng từ chối quyền truy cập vị trí'; break;
+                    case err.POSITION_UNAVAILABLE: msg = 'Không thể xác định vị trí'; break;
+                    case err.TIMEOUT: msg = 'Quá thời gian chờ'; break;
+                    default: msg = 'Lỗi không xác định';
+                }
+                statusDiv.innerHTML = '❌ GPS lỗi: ' + msg;
+            },
+            { enableHighAccuracy: true, timeout: 10000 }
+        );
+    });
+    </script>
+    """
+    st.components.v1.html(components_html, height=100)
+
+def handle_gps_query_params():
+    """Đọc query params, lưu vào session_state và xóa query params"""
+    params = st.query_params
+    if 'lat' in params and 'lon' in params:
+        try:
+            lat = float(params['lat'])
+            lon = float(params['lon'])
+            st.session_state['gps_lat'] = lat
+            st.session_state['gps_lon'] = lon
+            st.success(f"✅ Đã lấy GPS: {lat:.5f}, {lon:.5f}")
+            # Xóa query params sau khi đã lưu
+            st.query_params.clear()
+            st.rerun()
+        except:
+            pass
 
 # ------------------ CRUD CƠ SỞ ------------------
 def add_facility(data, images):
@@ -271,7 +304,10 @@ def login():
 
 def main_app():
     st.title("🏨 Quản lý lưu trú Pro")
-    # Sidebar đẹp
+    # Xử lý GPS từ query params
+    handle_gps_query_params()
+    
+    # Sidebar
     with st.sidebar:
         st.image("https://cdn-icons-png.flaticon.com/512/619/619015.png", width=80)
         st.write(f"👋 **{st.session_state['username']}**")
@@ -326,27 +362,19 @@ def main_app():
             st.subheader("➕ Thêm cơ sở mới")
             fac = None
         
-        # Nút lấy GPS đặt ngoài form
-        col_gps_button, col_gps_status = st.columns([1,3])
-        with col_gps_button:
-            if st.button("📍 Lấy vị trí GPS hiện tại"):
-                lat, lon = get_current_location()
-                if lat and lon:
-                    st.session_state['gps_lat'] = lat
-                    st.session_state['gps_lon'] = lon
-                    st.success(f"Đã lấy GPS: {lat:.5f}, {lon:.5f}")
-                else:
-                    st.error("Không lấy được GPS. Vui lòng nhập tay.")
-        with col_gps_status:
+        # Component lấy GPS (chỉ hiển thị khi thêm mới)
+        if not fac:
+            st.markdown("#### 📍 Lấy tọa độ GPS")
+            gps_component()
             if 'gps_lat' in st.session_state:
-                st.info(f"GPS mới nhất: {st.session_state['gps_lat']:.5f}, {st.session_state['gps_lon']:.5f}")
+                st.info(f"Đã lấy GPS: {st.session_state['gps_lat']:.5f}, {st.session_state['gps_lon']:.5f}")
         
         with st.form("facility_form", clear_on_submit=not fac):
             name = st.text_input("Tên cơ sở *", value=fac['name'] if fac else "")
             type_opt = ["nhà trọ", "nhà dân", "nhà nghỉ", "khách sạn", "cơ sở tín ngưỡng", "công trường", "cơ sở khác"]
             type_ = st.selectbox("Loại hình", type_opt, index=type_opt.index(fac['type']) if fac and fac['type'] in type_opt else 0)
             
-            # Nhập tay tọa độ, có thể dùng giá trị từ GPS nếu có
+            # Tọa độ: ưu tiên GPS từ session_state, sau đó từ dữ liệu cũ
             default_lat = st.session_state.get('gps_lat', fac['lat'] if fac and fac['lat'] else 0.0)
             default_lon = st.session_state.get('gps_lon', fac['lon'] if fac and fac['lon'] else 0.0)
             lat = st.number_input("Vĩ độ", value=default_lat, format="%.6f")
@@ -364,7 +392,6 @@ def main_app():
             
             submitted = st.form_submit_button("✅ Lưu cơ sở")
             if submitted:
-                # Validate
                 if not name or not resp_name:
                     st.error("Tên cơ sở và người chịu trách nhiệm là bắt buộc.")
                 elif resp_id_num and not validate_cccd(resp_id_num):
@@ -418,7 +445,6 @@ def main_app():
             fac_options = {row['name']: row['id'] for _, row in facilities_df.iterrows()}
             selected_fac_name = st.selectbox("Chọn cơ sở", list(fac_options.keys()), key="fac_select")
             selected_fac_id = fac_options[selected_fac_name]
-            # Tìm kiếm trong tab này
             search_local = st.text_input("🔍 Tìm người trong cơ sở này (tên/CCCD)", key="search_res_local")
             residents_df = get_residents(selected_fac_id, search_term=search_local if search_local else None)
             today = date.today()
@@ -461,7 +487,7 @@ def main_app():
                             st.write(f"**SĐT:** {r['phone']}")
             else:
                 st.info("Không có người nào trong cơ sở này.")
-            # Form thêm/sửa
+            # Form thêm/sửa người
             st.markdown("---")
             if 'edit_resident' in st.session_state:
                 st.subheader("✏️ Sửa thông tin người")
@@ -536,22 +562,18 @@ def main_app():
         col2.metric("👥 Đang lưu trú", current_count)
         col3.metric("⏰ Sắp hết hạn (<7 ngày)", soon_count, delta="cần theo dõi")
         col4.metric("📜 Đã rời đi", expired_count)
-        # Biểu đồ theo loại hình cơ sở
         if not all_fac.empty:
             fig_type = px.bar(all_fac, x='type', title="Số lượng cơ sở theo loại hình", color='type', text_auto=True)
             st.plotly_chart(fig_type, use_container_width=True)
-        # Biểu đồ tròn: tạm trú vs lưu trú
         if not all_res.empty:
             fig_pie = px.pie(all_res, names='note_type', title="Tỷ lệ Tạm trú / Lưu trú", hole=0.4)
             st.plotly_chart(fig_pie, use_container_width=True)
-        # Biểu đồ cột: số người theo cơ sở (top 10)
         if not all_res.empty and not all_fac.empty:
             res_fac = all_res.merge(all_fac[['id','name']], left_on='facility_id', right_on='id', how='left')
             top_fac = res_fac['name'].value_counts().head(10).reset_index()
             top_fac.columns = ['Cơ sở', 'Số người']
             fig_top = px.bar(top_fac, x='Cơ sở', y='Số người', title="Top 10 cơ sở đông người nhất")
             st.plotly_chart(fig_top, use_container_width=True)
-        # Danh sách sắp hết hạn
         st.subheader("⚠️ Danh sách người sắp hết hạn (dưới 7 ngày)")
         if not all_res.empty:
             soon_list = all_res[(all_res['end_date_dt'] >= today) & (all_res['end_date_dt'] <= today + timedelta(days=7))]
@@ -571,11 +593,6 @@ def main_app():
             st.info("Chưa có hoạt động nào.")
         else:
             st.dataframe(logs_df, use_container_width=True, height=500)
-    
-    # Xử lý chuyển tab từ nút "Xem người"
-    if 'active_tab' in st.session_state:
-        # không cần làm gì thêm, tab đã được set
-        pass
 
 # ------------------ LOGIN ------------------
 def main():
