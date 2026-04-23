@@ -178,7 +178,6 @@ def update_facility(data, images):
 def delete_facility(facility_id):
     with sqlite3.connect('database.db') as conn:
         c = conn.cursor()
-        # Lấy tên cơ sở để log
         c.execute("SELECT name FROM facilities WHERE id=?", (facility_id,))
         fac_name = c.fetchone()[0]
         c.execute("DELETE FROM residents WHERE facility_id=?", (facility_id,))
@@ -326,22 +325,33 @@ def main_app():
         else:
             st.subheader("➕ Thêm cơ sở mới")
             fac = None
+        
+        # Nút lấy GPS đặt ngoài form
+        col_gps_button, col_gps_status = st.columns([1,3])
+        with col_gps_button:
+            if st.button("📍 Lấy vị trí GPS hiện tại"):
+                lat, lon = get_current_location()
+                if lat and lon:
+                    st.session_state['gps_lat'] = lat
+                    st.session_state['gps_lon'] = lon
+                    st.success(f"Đã lấy GPS: {lat:.5f}, {lon:.5f}")
+                else:
+                    st.error("Không lấy được GPS. Vui lòng nhập tay.")
+        with col_gps_status:
+            if 'gps_lat' in st.session_state:
+                st.info(f"GPS mới nhất: {st.session_state['gps_lat']:.5f}, {st.session_state['gps_lon']:.5f}")
+        
         with st.form("facility_form", clear_on_submit=not fac):
             name = st.text_input("Tên cơ sở *", value=fac['name'] if fac else "")
             type_opt = ["nhà trọ", "nhà dân", "nhà nghỉ", "khách sạn", "cơ sở tín ngưỡng", "công trường", "cơ sở khác"]
             type_ = st.selectbox("Loại hình", type_opt, index=type_opt.index(fac['type']) if fac and fac['type'] in type_opt else 0)
-            col_gps1, col_gps2 = st.columns(2)
-            with col_gps1:
-                if st.button("📍 Lấy GPS", use_container_width=True):
-                    lat, lon = get_current_location()
-                    if lat and lon:
-                        st.session_state['gps_lat'] = lat
-                        st.session_state['gps_lon'] = lon
-                        st.success(f"Đã lấy: {lat:.5f}, {lon:.5f}")
-                    else:
-                        st.error("Không lấy được GPS, vui lòng nhập tay")
-                lat = st.number_input("Vĩ độ", value=st.session_state.get('gps_lat', fac['lat'] if fac and fac['lat'] else 0.0), format="%.6f")
-                lon = st.number_input("Kinh độ", value=st.session_state.get('gps_lon', fac['lon'] if fac and fac['lon'] else 0.0), format="%.6f")
+            
+            # Nhập tay tọa độ, có thể dùng giá trị từ GPS nếu có
+            default_lat = st.session_state.get('gps_lat', fac['lat'] if fac and fac['lat'] else 0.0)
+            default_lon = st.session_state.get('gps_lon', fac['lon'] if fac and fac['lon'] else 0.0)
+            lat = st.number_input("Vĩ độ", value=default_lat, format="%.6f")
+            lon = st.number_input("Kinh độ", value=default_lon, format="%.6f")
+            
             st.markdown("**👤 Người chịu trách nhiệm**")
             resp_name = st.text_input("Họ tên *", value=fac['responsible_name'] if fac else "")
             resp_dob = st.date_input("Sinh ngày", value=datetime.strptime(fac['responsible_dob'], "%Y-%m-%d").date() if fac and fac['responsible_dob'] else date.today())
@@ -351,6 +361,7 @@ def main_app():
             resp_id_img = st.file_uploader("Ảnh căn cước", type=["jpg","png","jpeg"], key="resp_id")
             fac_img = st.file_uploader("Ảnh cơ sở", type=["jpg","png","jpeg"], key="fac_img")
             total_rooms = st.number_input("Số phòng", min_value=0, value=int(fac['total_rooms']) if fac else 0, step=1)
+            
             submitted = st.form_submit_button("✅ Lưu cơ sở")
             if submitted:
                 # Validate
@@ -385,9 +396,16 @@ def main_app():
                     else:
                         add_facility(data, images)
                         st.success("Thêm mới thành công!")
+                    # Xóa GPS đã lưu
+                    if 'gps_lat' in st.session_state:
+                        del st.session_state['gps_lat']
+                        del st.session_state['gps_lon']
                     st.rerun()
             if fac and st.form_submit_button("❌ Hủy sửa"):
                 del st.session_state['edit_facility']
+                if 'gps_lat' in st.session_state:
+                    del st.session_state['gps_lat']
+                    del st.session_state['gps_lon']
                 st.rerun()
     
     # ------------------ TAB 2: NGƯỜI LƯU TRÚ ------------------
@@ -503,7 +521,6 @@ def main_app():
     # ------------------ TAB 3: THỐNG KÊ & BÁO CÁO ------------------
     with tabs[2]:
         st.subheader("📊 Thống kê tổng quan")
-        # Metrics
         all_res = get_residents()
         all_fac = get_facilities()
         today = date.today()
@@ -557,8 +574,8 @@ def main_app():
     
     # Xử lý chuyển tab từ nút "Xem người"
     if 'active_tab' in st.session_state:
-        st.session_state.pop('active_tab')
         # không cần làm gì thêm, tab đã được set
+        pass
 
 # ------------------ LOGIN ------------------
 def main():
