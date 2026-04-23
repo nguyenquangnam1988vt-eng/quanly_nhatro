@@ -9,60 +9,55 @@ import mimetypes
 from PIL import Image
 import plotly.express as px
 import plotly.graph_objects as go
+import pyperclip  # cần cài: pip install pyperclip
 
-# ------------------ CẤU HÌNH TRANG ------------------
-st.set_page_config(
-    page_title="QL Lưu trú Pro",
-    page_icon="🏨",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
+st.set_page_config(page_title="QL Lưu trú Pro", page_icon="🏨", layout="wide", initial_sidebar_state="collapsed")
 
-# ------------------ CSS MOBILE + UI ĐẸP ------------------
+# CSS
 st.markdown("""
     <style>
         @media (max-width: 768px) {
-            .stButton button { width: 100%; font-size: 1.1rem; padding: 0.4rem; }
-            .stTextInput, .stSelectbox, .stDateInput, .stTextArea, .stNumberInput { font-size: 0.9rem; }
+            .stButton button { width: 100%; font-size: 1.1rem; }
             h1 { font-size: 1.8rem; }
-            h2 { font-size: 1.4rem; }
         }
-        .metric-card {
-            background-color: #f0f2f6;
-            border-radius: 12px;
-            padding: 15px;
-            text-align: center;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        .copy-btn {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            padding: 5px 10px;
+            cursor: pointer;
         }
     </style>
 """, unsafe_allow_html=True)
 
-# ------------------ KHỞI TẠO DATABASE (có INDEX & LOG) ------------------
+# ------------------ DATABASE ------------------
 def init_db():
     with sqlite3.connect('database.db') as conn:
         c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY, password TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
+        # Thêm cột location_text vào bảng facilities nếu chưa có
+        c.execute("PRAGMA table_info(facilities)")
+        cols = [col[1] for col in c.fetchall()]
+        if 'location_text' not in cols:
+            c.execute("ALTER TABLE facilities ADD COLUMN location_text TEXT")
         c.execute('''CREATE TABLE IF NOT EXISTS facilities (
             id TEXT PRIMARY KEY, name TEXT, type TEXT, lat REAL, lon REAL,
             responsible_name TEXT, responsible_dob TEXT, responsible_id_number TEXT,
             responsible_permanent_address TEXT, responsible_phone TEXT,
             responsible_id_image_path TEXT, facility_image_path TEXT,
-            total_rooms INTEGER, created_at TEXT)''')
+            total_rooms INTEGER, created_at TEXT, location_text TEXT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS residents (
             id TEXT PRIMARY KEY, facility_id TEXT, fullname TEXT, dob TEXT,
             id_number TEXT, permanent_address TEXT, id_image_path TEXT,
             phone TEXT, room_number TEXT, start_date TEXT, end_date TEXT,
-            note_type TEXT, created_at TEXT,
-            FOREIGN KEY (facility_id) REFERENCES facilities(id))''')
+            note_type TEXT, created_at TEXT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT, action TEXT, target_type TEXT, target_id TEXT,
-            timestamp TEXT, details TEXT)''')
+            id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, action TEXT,
+            target_type TEXT, target_id TEXT, timestamp TEXT, details TEXT)''')
         c.execute("CREATE INDEX IF NOT EXISTS idx_res_facility ON residents(facility_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_res_id_number ON residents(id_number)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_res_end_date ON residents(end_date)")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_fac_type ON facilities(type)")
         c.execute("SELECT * FROM users WHERE username='admin'")
         if not c.fetchone():
             c.execute("INSERT INTO users VALUES ('admin', '123')")
@@ -75,44 +70,16 @@ def log_action(username, action, target_type, target_id, details=""):
                   (username, action, target_type, target_id, datetime.now().isoformat(), details))
         conn.commit()
 
-# ------------------ HÀM XỬ LÝ AN TOÀN ------------------
 def safe_parse_date(date_str):
-    """Chuyển đổi date string an toàn, trả về date hoặc None (hỗ trợ cả YYYY-MM-DD)"""
-    if not date_str or pd.isna(date_str):
-        return None
-    try:
-        if isinstance(date_str, date):
-            return date_str
-        if isinstance(date_str, str):
-            # Lưu trong DB là YYYY-MM-DD
-            return datetime.strptime(date_str, "%Y-%m-%d").date()
-        return None
-    except:
-        return None
+    if not date_str or pd.isna(date_str): return None
+    try: return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except: return None
 
-def validate_cccd(cccd):
-    return bool(re.fullmatch(r'\d{12}', str(cccd))) if cccd else False
-
-def validate_phone(phone):
-    return bool(re.fullmatch(r'(0|\+84)[0-9]{9,10}', str(phone))) if phone else False
-
-def validate_upload(file, max_size_mb=5):
-    if file is None:
-        return True, ""
-    if file.size > max_size_mb * 1024 * 1024:
-        return False, f"Kích thước tối đa {max_size_mb}MB"
-    mime = mimetypes.guess_type(file.name)[0]
-    if mime not in ['image/jpeg', 'image/png', 'image/jpg']:
-        return False, "Chỉ chấp nhận JPEG/PNG"
-    return True, ""
+def validate_cccd(cccd): return bool(re.fullmatch(r'\d{12}', str(cccd))) if cccd else False
+def validate_phone(phone): return bool(re.fullmatch(r'(0|\+84)[0-9]{9,10}', str(phone))) if phone else False
 
 def save_uploaded_file(uploaded_file, subfolder=""):
-    if uploaded_file is None:
-        return ""
-    valid, msg = validate_upload(uploaded_file)
-    if not valid:
-        st.error(msg)
-        return ""
+    if not uploaded_file: return ""
     os.makedirs("uploads", exist_ok=True)
     os.makedirs(f"uploads/{subfolder}", exist_ok=True)
     ext = uploaded_file.name.split('.')[-1].lower()
@@ -122,87 +89,44 @@ def save_uploaded_file(uploaded_file, subfolder=""):
         f.write(uploaded_file.getbuffer())
     return file_path
 
-# ------------------ GPS BẰNG HTML5 GEOLOCATION ------------------
-def gps_component():
-    components_html = """
-    <div id="gps-container" style="margin-bottom: 10px;">
-        <button id="get-gps" style="background-color:#4CAF50; color:white; padding:10px; border:none; border-radius:5px; font-size:16px; cursor:pointer;">
-            📍 Lấy vị trí GPS hiện tại
-        </button>
-        <div id="status" style="margin-top:8px; font-size:14px; color:#666;"></div>
-    </div>
-    <script>
-    document.getElementById('get-gps').addEventListener('click', function() {
-        var statusDiv = document.getElementById('status');
-        statusDiv.innerHTML = 'Đang lấy vị trí...';
-        if (!navigator.geolocation) {
-            statusDiv.innerHTML = '❌ Trình duyệt không hỗ trợ GPS';
-            return;
-        }
-        navigator.geolocation.getCurrentPosition(
-            function(pos) {
-                var lat = pos.coords.latitude;
-                var lon = pos.coords.longitude;
-                var url = new URL(window.location.href);
-                url.searchParams.set('lat', lat);
-                url.searchParams.set('lon', lon);
-                window.location.href = url.href;
-            },
-            function(err) {
-                var msg = '';
-                switch(err.code) {
-                    case err.PERMISSION_DENIED: msg = 'Người dùng từ chối quyền truy cập vị trí'; break;
-                    case err.POSITION_UNAVAILABLE: msg = 'Không thể xác định vị trí'; break;
-                    case err.TIMEOUT: msg = 'Quá thời gian chờ'; break;
-                    default: msg = 'Lỗi không xác định';
-                }
-                statusDiv.innerHTML = '❌ GPS lỗi: ' + msg;
-            },
-            { enableHighAccuracy: true, timeout: 10000 }
-        );
-    });
-    </script>
-    """
-    st.components.v1.html(components_html, height=100)
+def copy_to_clipboard(text):
+    st.session_state['copy_text'] = text
+    # Dùng JavaScript để copy
+    st.markdown(f"""
+        <script>
+        function copyText() {{
+            navigator.clipboard.writeText(`{text}`);
+        }}
+        copyText();
+        </script>
+        """, unsafe_allow_html=True)
+    st.success("Đã sao chép vị trí!")
 
-def handle_gps_query_params():
-    params = st.query_params
-    if 'lat' in params and 'lon' in params:
-        try:
-            lat = float(params['lat'])
-            lon = float(params['lon'])
-            st.session_state['gps_lat'] = lat
-            st.session_state['gps_lon'] = lon
-            st.success(f"✅ Đã lấy GPS: {lat:.5f}, {lon:.5f}")
-            st.query_params.clear()
-            st.rerun()
-        except:
-            pass
-
-# ------------------ CRUD CƠ SỞ ------------------
+# ------------------ CRUD ------------------
 def add_facility(data, images):
     with sqlite3.connect('database.db') as conn:
         c = conn.cursor()
-        c.execute('''INSERT INTO facilities VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                  (data['id'], data['name'], data['type'], data['lat'], data['lon'],
-                   data['responsible_name'], data['responsible_dob'], data['responsible_id_number'],
-                   data['responsible_permanent_address'], data['responsible_phone'],
-                   images['resp_id_img'], images['fac_img'], data['total_rooms'], data['created_at']))
+        c.execute('''INSERT INTO facilities (id, name, type, lat, lon, responsible_name, responsible_dob,
+                    responsible_id_number, responsible_permanent_address, responsible_phone,
+                    responsible_id_image_path, facility_image_path, total_rooms, created_at, location_text)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                  (data['id'], data['name'], data['type'], 0, 0, data['responsible_name'],
+                   data['responsible_dob'], data['responsible_id_number'], data['responsible_permanent_address'],
+                   data['responsible_phone'], images['resp_id_img'], images['fac_img'],
+                   data['total_rooms'], data['created_at'], data['location_text']))
         conn.commit()
     log_action(st.session_state['username'], "CREATE", "facility", data['id'], f"Tên: {data['name']}")
 
 def update_facility(data, images):
     with sqlite3.connect('database.db') as conn:
         c = conn.cursor()
-        c.execute('''UPDATE facilities SET name=?, type=?, lat=?, lon=?,
-                     responsible_name=?, responsible_dob=?, responsible_id_number=?,
-                     responsible_permanent_address=?, responsible_phone=?,
-                     responsible_id_image_path=?, facility_image_path=?, total_rooms=?
-                     WHERE id=?''',
-                  (data['name'], data['type'], data['lat'], data['lon'],
-                   data['responsible_name'], data['responsible_dob'], data['responsible_id_number'],
-                   data['responsible_permanent_address'], data['responsible_phone'],
-                   images['resp_id_img'], images['fac_img'], data['total_rooms'], data['id']))
+        c.execute('''UPDATE facilities SET name=?, type=?, responsible_name=?, responsible_dob=?,
+                    responsible_id_number=?, responsible_permanent_address=?, responsible_phone=?,
+                    responsible_id_image_path=?, facility_image_path=?, total_rooms=?, location_text=?
+                    WHERE id=?''',
+                  (data['name'], data['type'], data['responsible_name'], data['responsible_dob'],
+                   data['responsible_id_number'], data['responsible_permanent_address'], data['responsible_phone'],
+                   images['resp_id_img'], images['fac_img'], data['total_rooms'], data['location_text'], data['id']))
         conn.commit()
     log_action(st.session_state['username'], "UPDATE", "facility", data['id'], f"Tên: {data['name']}")
 
@@ -283,7 +207,7 @@ def get_residents(facility_id=None, search_term=None):
         df = pd.read_sql_query(query, conn, params=params)
     return df
 
-# ------------------ GIAO DIỆN CHÍNH ------------------
+# ------------------ LOGIN ------------------
 def login():
     st.sidebar.title("🔐 Đăng nhập")
     username = st.sidebar.text_input("Tên đăng nhập")
@@ -302,8 +226,6 @@ def login():
 
 def main_app():
     st.title("🏨 Quản lý lưu trú Pro")
-    handle_gps_query_params()
-    
     with st.sidebar:
         st.image("https://cdn-icons-png.flaticon.com/512/619/619015.png", width=80)
         st.write(f"👋 **{st.session_state['username']}**")
@@ -318,7 +240,7 @@ def main_app():
     
     tabs = st.tabs(["🏢 Cơ sở", "👥 Người lưu trú", "📊 Thống kê & Báo cáo", "📜 Nhật ký hệ thống"])
     
-    # ------------------ TAB 1: CƠ SỞ ------------------
+    # TAB 1: CƠ SỞ
     with tabs[0]:
         st.subheader("📋 Danh sách cơ sở")
         facilities_df = get_facilities(search_term=search_fac, filter_type=filter_type)
@@ -334,7 +256,16 @@ def main_app():
                         else:
                             st.image("https://placehold.co/150x100?text=No+Image", width=150)
                     with col2:
-                        st.write(f"📍 GPS: {row['lat']:.5f}, {row['lon']:.5f}" if row['lat'] else "📍 Chưa có GPS")
+                        st.write(f"📍 Vị trí: {row['location_text'] if row['location_text'] else 'Chưa có'}")
+                        if row['location_text']:
+                            # Nút copy
+                            if st.button("📋 Sao chép vị trí", key=f"copy_{row['id']}"):
+                                st.markdown(f"""
+                                    <script>
+                                    navigator.clipboard.writeText(`{row['location_text']}`);
+                                    </script>
+                                """, unsafe_allow_html=True)
+                                st.success("Đã sao chép vị trí vào clipboard!")
                         st.write(f"👤 Chịu trách nhiệm: {row['responsible_name']} - {row['responsible_phone']}")
                         st.write(f"🚪 Tổng phòng: {row['total_rooms']}")
                         col_a, col_b, col_c = st.columns(3)
@@ -347,7 +278,6 @@ def main_app():
                             st.rerun()
                         if col_c.button("👥 Xem người", key=f"view_res_{row['id']}"):
                             st.session_state['view_facility_id'] = row['id']
-                            st.session_state['active_tab'] = 1
                             st.rerun()
         st.markdown("---")
         if 'edit_facility' in st.session_state:
@@ -357,29 +287,19 @@ def main_app():
             st.subheader("➕ Thêm cơ sở mới")
             fac = None
         
-        if not fac:
-            st.markdown("#### 📍 Lấy tọa độ GPS")
-            gps_component()
-            if 'gps_lat' in st.session_state:
-                st.info(f"Đã lấy GPS: {st.session_state['gps_lat']:.5f}, {st.session_state['gps_lon']:.5f}")
-        
         with st.form("facility_form", clear_on_submit=not fac):
             name = st.text_input("Tên cơ sở *", value=fac['name'] if fac else "")
             type_opt = ["nhà trọ", "nhà dân", "nhà nghỉ", "khách sạn", "cơ sở tín ngưỡng", "công trường", "cơ sở khác"]
             type_ = st.selectbox("Loại hình", type_opt, index=type_opt.index(fac['type']) if fac and fac['type'] in type_opt else 0)
             
-            default_lat = st.session_state.get('gps_lat', fac['lat'] if fac and fac['lat'] else 0.0)
-            default_lon = st.session_state.get('gps_lon', fac['lon'] if fac and fac['lon'] else 0.0)
-            lat = st.number_input("Vĩ độ", value=default_lat, format="%.6f")
-            lon = st.number_input("Kinh độ", value=default_lon, format="%.6f")
+            # Ô nhập vị trí (URL Google Maps hoặc chuỗi tọa độ)
+            location_text = st.text_input("📍 Vị trí (dán link Google Maps hoặc tọa độ)", 
+                                          value=fac['location_text'] if fac and fac['location_text'] else "")
+            st.caption("Hướng dẫn: Trên Google Maps, nhấn 'Chia sẻ' → 'Sao chép liên kết' rồi dán vào đây. Hoặc nhập tọa độ dạng '21.0285, 105.8542'")
             
             st.markdown("**👤 Người chịu trách nhiệm**")
             resp_name = st.text_input("Họ tên *", value=fac['responsible_name'] if fac else "")
-            # SỬA: thêm format="DD/MM/YYYY" cho ngày tháng Việt Nam
-            if fac and fac['responsible_dob']:
-                default_dob = safe_parse_date(fac['responsible_dob'])
-            else:
-                default_dob = date.today()
+            default_dob = safe_parse_date(fac['responsible_dob']) if fac and fac['responsible_dob'] else date.today()
             resp_dob = st.date_input("Sinh ngày", value=default_dob, format="DD/MM/YYYY")
             resp_id_num = st.text_input("Số căn cước (12 số)", value=fac['responsible_id_number'] if fac else "")
             resp_perm_addr = st.text_area("Nơi đăng ký thường trú", value=fac['responsible_permanent_address'] if fac else "")
@@ -403,15 +323,14 @@ def main_app():
                         'id': fac['id'] if fac else str(uuid.uuid4()),
                         'name': name,
                         'type': type_,
-                        'lat': lat,
-                        'lon': lon,
                         'responsible_name': resp_name,
                         'responsible_dob': resp_dob.strftime("%Y-%m-%d"),
                         'responsible_id_number': resp_id_num,
                         'responsible_permanent_address': resp_perm_addr,
                         'responsible_phone': resp_phone,
                         'total_rooms': total_rooms,
-                        'created_at': datetime.now().isoformat()
+                        'created_at': datetime.now().isoformat(),
+                        'location_text': location_text
                     }
                     images = {'resp_id_img': resp_img_path, 'fac_img': fac_img_path}
                     if fac:
@@ -421,18 +340,12 @@ def main_app():
                     else:
                         add_facility(data, images)
                         st.success("Thêm mới thành công!")
-                    if 'gps_lat' in st.session_state:
-                        del st.session_state['gps_lat']
-                        del st.session_state['gps_lon']
                     st.rerun()
             if fac and st.form_submit_button("❌ Hủy sửa"):
                 del st.session_state['edit_facility']
-                if 'gps_lat' in st.session_state:
-                    del st.session_state['gps_lat']
-                    del st.session_state['gps_lon']
                 st.rerun()
     
-    # ------------------ TAB 2: NGƯỜI LƯU TRÚ ------------------
+    # TAB 2: NGƯỜI LƯU TRÚ (giữ nguyên như cũ, chỉ thay đổi ngày tháng)
     with tabs[1]:
         st.subheader("👥 Quản lý người tạm trú/lưu trú")
         facilities_df = get_facilities()
@@ -468,7 +381,6 @@ def main_app():
                             col_a, col_b = st.columns(2)
                             if col_a.button("✏️ Sửa", key=f"edit_res_{r['id']}"):
                                 st.session_state['edit_resident'] = r.to_dict()
-                                st.session_state['edit_facility_id'] = selected_fac_id
                                 st.rerun()
                             if col_b.button("🗑️ Xóa", key=f"del_res_{r['id']}"):
                                 delete_resident(r['id'])
@@ -493,7 +405,6 @@ def main_app():
                 res = None
             with st.form("resident_form", clear_on_submit=not res):
                 fullname = st.text_input("Họ tên *", value=res['fullname'] if res else "")
-                # SỬA: format DD/MM/YYYY cho ngày sinh
                 default_dob = safe_parse_date(res['dob']) if res and res['dob'] else date.today()
                 dob = st.date_input("Sinh ngày", value=default_dob, format="DD/MM/YYYY")
                 id_number = st.text_input("Số căn cước (12 số)", value=res['id_number'] if res else "")
@@ -501,7 +412,6 @@ def main_app():
                 id_img = st.file_uploader("Ảnh căn cước", type=["jpg","png","jpeg"], key="resident_id")
                 phone = st.text_input("Số điện thoại", value=res['phone'] if res else "")
                 room = st.text_input("Số phòng *", value=res['room_number'] if res else "")
-                # SỬA: format DD/MM/YYYY cho ngày bắt đầu và kết thúc
                 default_start = safe_parse_date(res['start_date']) if res and res['start_date'] else date.today()
                 default_end = safe_parse_date(res['end_date']) if res and res['end_date'] else date.today()
                 start_date = st.date_input("Ngày bắt đầu", value=default_start, format="DD/MM/YYYY")
@@ -545,7 +455,7 @@ def main_app():
                     del st.session_state['edit_resident']
                     st.rerun()
     
-    # ------------------ TAB 3: THỐNG KÊ ------------------
+    # TAB 3: THỐNG KÊ
     with tabs[2]:
         st.subheader("📊 Thống kê tổng quan")
         all_res = get_residents()
@@ -585,7 +495,7 @@ def main_app():
                     fac_name = all_fac[all_fac['id']==r['facility_id']]['name'].values[0] if not all_fac.empty else "Không rõ"
                     st.write(f"- **{r['fullname']}** - {r['phone']} - {fac_name} - Hết hạn: {r['end_date']}")
     
-    # ------------------ TAB 4: NHẬT KÝ ------------------
+    # TAB 4: NHẬT KÝ
     with tabs[3]:
         st.subheader("📜 Nhật ký hoạt động")
         with sqlite3.connect('database.db') as conn:
@@ -595,7 +505,6 @@ def main_app():
         else:
             st.dataframe(logs_df, use_container_width=True, height=500)
 
-# ------------------ LOGIN ------------------
 def main():
     init_db()
     if 'logged_in' not in st.session_state:
