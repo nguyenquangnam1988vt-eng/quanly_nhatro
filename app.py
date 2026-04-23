@@ -77,12 +77,14 @@ def log_action(username, action, target_type, target_id, details=""):
 
 # ------------------ HÀM XỬ LÝ AN TOÀN ------------------
 def safe_parse_date(date_str):
+    """Chuyển đổi date string an toàn, trả về date hoặc None (hỗ trợ cả YYYY-MM-DD)"""
     if not date_str or pd.isna(date_str):
         return None
     try:
         if isinstance(date_str, date):
             return date_str
         if isinstance(date_str, str):
+            # Lưu trong DB là YYYY-MM-DD
             return datetime.strptime(date_str, "%Y-%m-%d").date()
         return None
     except:
@@ -122,7 +124,6 @@ def save_uploaded_file(uploaded_file, subfolder=""):
 
 # ------------------ GPS BẰNG HTML5 GEOLOCATION ------------------
 def gps_component():
-    """Tạo component HTML lấy GPS, lưu vào query_params"""
     components_html = """
     <div id="gps-container" style="margin-bottom: 10px;">
         <button id="get-gps" style="background-color:#4CAF50; color:white; padding:10px; border:none; border-radius:5px; font-size:16px; cursor:pointer;">
@@ -142,7 +143,6 @@ def gps_component():
             function(pos) {
                 var lat = pos.coords.latitude;
                 var lon = pos.coords.longitude;
-                // Chuyển hướng đến cùng URL với query params
                 var url = new URL(window.location.href);
                 url.searchParams.set('lat', lat);
                 url.searchParams.set('lon', lon);
@@ -166,7 +166,6 @@ def gps_component():
     st.components.v1.html(components_html, height=100)
 
 def handle_gps_query_params():
-    """Đọc query params, lưu vào session_state và xóa query params"""
     params = st.query_params
     if 'lat' in params and 'lon' in params:
         try:
@@ -175,7 +174,6 @@ def handle_gps_query_params():
             st.session_state['gps_lat'] = lat
             st.session_state['gps_lon'] = lon
             st.success(f"✅ Đã lấy GPS: {lat:.5f}, {lon:.5f}")
-            # Xóa query params sau khi đã lưu
             st.query_params.clear()
             st.rerun()
         except:
@@ -304,10 +302,8 @@ def login():
 
 def main_app():
     st.title("🏨 Quản lý lưu trú Pro")
-    # Xử lý GPS từ query params
     handle_gps_query_params()
     
-    # Sidebar
     with st.sidebar:
         st.image("https://cdn-icons-png.flaticon.com/512/619/619015.png", width=80)
         st.write(f"👋 **{st.session_state['username']}**")
@@ -353,7 +349,6 @@ def main_app():
                             st.session_state['view_facility_id'] = row['id']
                             st.session_state['active_tab'] = 1
                             st.rerun()
-        # Form thêm/sửa cơ sở
         st.markdown("---")
         if 'edit_facility' in st.session_state:
             st.subheader("✏️ Sửa cơ sở")
@@ -362,7 +357,6 @@ def main_app():
             st.subheader("➕ Thêm cơ sở mới")
             fac = None
         
-        # Component lấy GPS (chỉ hiển thị khi thêm mới)
         if not fac:
             st.markdown("#### 📍 Lấy tọa độ GPS")
             gps_component()
@@ -374,7 +368,6 @@ def main_app():
             type_opt = ["nhà trọ", "nhà dân", "nhà nghỉ", "khách sạn", "cơ sở tín ngưỡng", "công trường", "cơ sở khác"]
             type_ = st.selectbox("Loại hình", type_opt, index=type_opt.index(fac['type']) if fac and fac['type'] in type_opt else 0)
             
-            # Tọa độ: ưu tiên GPS từ session_state, sau đó từ dữ liệu cũ
             default_lat = st.session_state.get('gps_lat', fac['lat'] if fac and fac['lat'] else 0.0)
             default_lon = st.session_state.get('gps_lon', fac['lon'] if fac and fac['lon'] else 0.0)
             lat = st.number_input("Vĩ độ", value=default_lat, format="%.6f")
@@ -382,7 +375,12 @@ def main_app():
             
             st.markdown("**👤 Người chịu trách nhiệm**")
             resp_name = st.text_input("Họ tên *", value=fac['responsible_name'] if fac else "")
-            resp_dob = st.date_input("Sinh ngày", value=datetime.strptime(fac['responsible_dob'], "%Y-%m-%d").date() if fac and fac['responsible_dob'] else date.today())
+            # SỬA: thêm format="DD/MM/YYYY" cho ngày tháng Việt Nam
+            if fac and fac['responsible_dob']:
+                default_dob = safe_parse_date(fac['responsible_dob'])
+            else:
+                default_dob = date.today()
+            resp_dob = st.date_input("Sinh ngày", value=default_dob, format="DD/MM/YYYY")
             resp_id_num = st.text_input("Số căn cước (12 số)", value=fac['responsible_id_number'] if fac else "")
             resp_perm_addr = st.text_area("Nơi đăng ký thường trú", value=fac['responsible_permanent_address'] if fac else "")
             resp_phone = st.text_input("Số điện thoại", value=fac['responsible_phone'] if fac else "")
@@ -423,7 +421,6 @@ def main_app():
                     else:
                         add_facility(data, images)
                         st.success("Thêm mới thành công!")
-                    # Xóa GPS đã lưu
                     if 'gps_lat' in st.session_state:
                         del st.session_state['gps_lat']
                         del st.session_state['gps_lon']
@@ -449,7 +446,7 @@ def main_app():
             residents_df = get_residents(selected_fac_id, search_term=search_local if search_local else None)
             today = date.today()
             if not residents_df.empty:
-                residents_df['end_date_dt'] = residents_df['end_date'].apply(lambda x: safe_parse_date(x))
+                residents_df['end_date_dt'] = residents_df['end_date'].apply(safe_parse_date)
                 current = residents_df[residents_df['end_date_dt'] >= today] if not residents_df['end_date_dt'].isna().all() else pd.DataFrame()
                 past = residents_df[residents_df['end_date_dt'] < today] if not residents_df['end_date_dt'].isna().all() else pd.DataFrame()
                 st.markdown("### 🟢 Đang lưu trú/tạm trú")
@@ -487,7 +484,6 @@ def main_app():
                             st.write(f"**SĐT:** {r['phone']}")
             else:
                 st.info("Không có người nào trong cơ sở này.")
-            # Form thêm/sửa người
             st.markdown("---")
             if 'edit_resident' in st.session_state:
                 st.subheader("✏️ Sửa thông tin người")
@@ -497,14 +493,19 @@ def main_app():
                 res = None
             with st.form("resident_form", clear_on_submit=not res):
                 fullname = st.text_input("Họ tên *", value=res['fullname'] if res else "")
-                dob = st.date_input("Sinh ngày", value=safe_parse_date(res['dob']) if res and res['dob'] else date.today())
+                # SỬA: format DD/MM/YYYY cho ngày sinh
+                default_dob = safe_parse_date(res['dob']) if res and res['dob'] else date.today()
+                dob = st.date_input("Sinh ngày", value=default_dob, format="DD/MM/YYYY")
                 id_number = st.text_input("Số căn cước (12 số)", value=res['id_number'] if res else "")
                 perm_addr = st.text_area("Nơi đăng ký thường trú", value=res['permanent_address'] if res else "")
                 id_img = st.file_uploader("Ảnh căn cước", type=["jpg","png","jpeg"], key="resident_id")
                 phone = st.text_input("Số điện thoại", value=res['phone'] if res else "")
                 room = st.text_input("Số phòng *", value=res['room_number'] if res else "")
-                start_date = st.date_input("Ngày bắt đầu", value=safe_parse_date(res['start_date']) if res and res['start_date'] else date.today())
-                end_date = st.date_input("Ngày kết thúc", value=safe_parse_date(res['end_date']) if res and res['end_date'] else date.today())
+                # SỬA: format DD/MM/YYYY cho ngày bắt đầu và kết thúc
+                default_start = safe_parse_date(res['start_date']) if res and res['start_date'] else date.today()
+                default_end = safe_parse_date(res['end_date']) if res and res['end_date'] else date.today()
+                start_date = st.date_input("Ngày bắt đầu", value=default_start, format="DD/MM/YYYY")
+                end_date = st.date_input("Ngày kết thúc", value=default_end, format="DD/MM/YYYY")
                 note_type = st.radio("Loại hình", ["Tạm trú", "Lưu trú"], index=0 if not res else (0 if res['note_type']=="Tạm trú" else 1))
                 submitted = st.form_submit_button("✅ Lưu người")
                 if submitted:
@@ -544,7 +545,7 @@ def main_app():
                     del st.session_state['edit_resident']
                     st.rerun()
     
-    # ------------------ TAB 3: THỐNG KÊ & BÁO CÁO ------------------
+    # ------------------ TAB 3: THỐNG KÊ ------------------
     with tabs[2]:
         st.subheader("📊 Thống kê tổng quan")
         all_res = get_residents()
